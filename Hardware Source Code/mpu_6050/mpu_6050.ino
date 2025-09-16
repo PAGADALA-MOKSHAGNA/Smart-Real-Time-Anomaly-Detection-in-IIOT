@@ -49,8 +49,8 @@ void loop()
 {
     mpu.update(); // update sensor
 
-    if ((millis() - printTimer) > 200)
-    { // print every 200 ms
+    if ((millis() - printTimer) > 3000)
+    {
         // Raw accelerometer values (in g)
         Serial.print("Acc (g) -> X: ");
         Serial.print(mpu.getAccX(), 3);

@@ -18,7 +18,7 @@
 #define BMP_I2C_ADDR 0x76        // change to 0x77 if needed
 #define SEALEVELPRESSURE_HPA 1013.25F
 #define SERIAL_BAUD 115200
-#define SAMPLE_INTERVAL_MS 1000UL   // sample period (ms)
+#define SAMPLE_INTERVAL_MS 3000UL   // sample period (ms)
 
 Adafruit_BMP280 bmp; // BMP280 (no humidity)
 MPU6050 mpu(Wire);
