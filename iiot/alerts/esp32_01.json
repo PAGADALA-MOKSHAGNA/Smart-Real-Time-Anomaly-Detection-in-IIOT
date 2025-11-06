@@ -1,0 +1,9 @@
+{
+  "ts":"2025-11-06T10:42:00Z",
+  "device_id":"esp32-01",
+  "label":"Anomaly",
+  "probability":0.8731,
+  "threshold":0.5,
+  "features_order":[ "Temperature_C","Pressure_hPa","AngleX","AngleY","AngleZ",
+                     "AccX_g","AccY_g","AccZ_g","Altitude_m" ]
+}

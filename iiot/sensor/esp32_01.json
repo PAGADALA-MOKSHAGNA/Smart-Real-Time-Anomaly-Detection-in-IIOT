@@ -1,0 +1,13 @@
+{
+  "ts":"2025-11-06T10:42:00Z",
+  "device_id":"esp32-01",
+  "Temperature_C":31.7,
+  "Pressure_hPa":974.98,
+  "AngleX":-1.14,
+  "AngleY":0.15,
+  "AngleZ":-5883.86,
+  "AccX_g":-0.012,
+  "AccY_g":-0.002,
+  "AccZ_g":0.991,
+  "Altitude_m":123.45
+}
