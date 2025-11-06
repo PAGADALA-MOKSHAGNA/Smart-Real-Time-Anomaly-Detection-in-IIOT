@@ -1,5 +1,5 @@
 /*
-  ESP32 BMP280 + MPU6050 Web Server (no ACS712)
+  ESP32 BMP280 + MPU6050 Web Server 
   - Shows IP in Serial
   - Serves '/' (HTML) and '/data' (JSON) endpoints
   - Browser polls /data every 3 seconds to update UI
