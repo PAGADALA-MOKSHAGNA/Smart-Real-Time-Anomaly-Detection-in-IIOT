@@ -1,5 +1,5 @@
 /*
-  ESP32 BMP280 + MPU6050 Web Server (with persistent calibration + LCD + IR alert)
+  ESP32 BMP280 + MPU6050 Web Server (no ACS712)
   - Shows IP in Serial
   - Serves '/' (HTML) and '/data' (JSON) endpoints
   - New endpoint '/calibrate' performs averaging calibration and saves offsets to Preferences
@@ -17,14 +17,14 @@
 #include <LiquidCrystal_I2C.h>
 
 // ---------- USER CONFIG ----------
-const char* WIFI_SSID = "Janardhana Rao";
-const char* WIFI_PASS = "Madhavi#888";
+const char *WIFI_SSID = "Janardhana Rao";
+const char *WIFI_PASS = "Madhavi#888";
 const int IR_PIN = 27;
 
 // Basic HTTP auth (optional). Set USE_BASIC_AUTH=false to disable.
 const bool USE_BASIC_AUTH = true;
-const char* WWW_USER = "Mokshagna";
-const char* WWW_PASS = "MLG333";
+const char *WWW_USER = "Mokshagna";
+const char *WWW_PASS = "MLG333";
 // ---------------------------------
 
 #define SDA_PIN 21
@@ -33,7 +33,7 @@ const char* WWW_PASS = "MLG333";
 #define BMP_I2C_ADDR 0x76
 #define SEALEVELPRESSURE_HPA 1013.25F
 #define SERIAL_BAUD 115200
-#define POLL_INTERVAL_MS 1000UL  // not used for server polling but kept
+#define POLL_INTERVAL_MS 1000UL // not used for server polling but kept
 
 Adafruit_BMP280 bmp;
 MPU6050 mpu(Wire);
@@ -57,7 +57,8 @@ float gyrOffZ = 3.6400f;
 
 bool offsetsLoaded = false;
 
-struct SensorReading {
+struct SensorReading
+{
   unsigned long esp_ms;
   float temperature;
   float pressure;
@@ -69,7 +70,8 @@ struct SensorReading {
 static inline float rad2deg(float r) { return r * 57.29577951308232f; }
 
 // ---------- Helpers: save/load offsets ----------
-void saveOffsetsToPrefs() {
+void saveOffsetsToPrefs()
+{
   prefs.begin("mpu", false);
   prefs.putFloat("ax", accOffX);
   prefs.putFloat("ay", accOffY);
@@ -81,9 +83,11 @@ void saveOffsetsToPrefs() {
   prefs.end();
 }
 
-void loadOffsetsFromPrefs() {
+void loadOffsetsFromPrefs()
+{
   prefs.begin("mpu", true);
-  if (prefs.getBool("ok", false)) {
+  if (prefs.getBool("ok", false))
+  {
     accOffX = prefs.getFloat("ax", accOffX);
     accOffY = prefs.getFloat("ay", accOffY);
     accOffZ = prefs.getFloat("az", accOffZ);
@@ -98,13 +102,15 @@ void loadOffsetsFromPrefs() {
 // ---------- Calibration routine (averaging) ----------
 bool doAveragingCalibration(unsigned int samples, unsigned long sampleDelayMs,
                             float &out_accOffX, float &out_accOffY, float &out_accOffZ,
-                            float &out_gyrOffX, float &out_gyrOffY, float &out_gyrOffZ) {
+                            float &out_gyrOffX, float &out_gyrOffY, float &out_gyrOffZ)
+{
   double sAx = 0, sAy = 0, sAz = 0;
   double sGx = 0, sGy = 0, sGz = 0;
 
   delay(200); // small settle
 
-  for (unsigned int i = 0; i < samples; ++i) {
+  for (unsigned int i = 0; i < samples; ++i)
+  {
     mpu.update();
     // library returns accel in g and gyro in deg/s
     float ax = mpu.getAccX();
@@ -142,7 +148,8 @@ bool doAveragingCalibration(unsigned int samples, unsigned long sampleDelayMs,
   out_gyrOffZ = meanGz;
 
   // sanity check: ensure meanAz reasonably near ±1g else fail
-  if (fabs(meanAz) < 0.5f) {
+  if (fabs(meanAz) < 0.5f)
+  {
     // probably sensor not oriented or something wrong
     return false;
   }
@@ -150,16 +157,20 @@ bool doAveragingCalibration(unsigned int samples, unsigned long sampleDelayMs,
 }
 
 // ---------- Sensor read (applies offsets and computes corrected tilt) ----------
-SensorReading readSensors() {
+SensorReading readSensors()
+{
   SensorReading r;
   r.esp_ms = millis();
 
   // BMP readings (if available)
-  if (bmp_ok) {
-    r.temperature = bmp.readTemperature();            // °C
-    r.pressure    = bmp.readPressure() / 100.0F;      // hPa
-    r.altitude    = bmp.readAltitude(SEALEVELPRESSURE_HPA); // m
-  } else {
+  if (bmp_ok)
+  {
+    r.temperature = bmp.readTemperature();               // °C
+    r.pressure = bmp.readPressure() / 100.0F;            // hPa
+    r.altitude = bmp.readAltitude(SEALEVELPRESSURE_HPA); // m
+  }
+  else
+  {
     r.temperature = 0.0;
     r.pressure = 0.0;
     r.altitude = 0.0;
@@ -179,7 +190,7 @@ SensorReading readSensors() {
   float corrAz = rawAz - accOffZ;
 
   // Compute tilt X and Y (degrees) from corrected accel
-  float angleX = atan2(corrAy, corrAz) * 180.0f / PI; // pitch-like
+  float angleX = atan2(corrAy, corrAz) * 180.0f / PI;                                    // pitch-like
   float angleY = atan2(-corrAx, sqrtf(corrAy * corrAy + corrAz * corrAz)) * 180.0f / PI; // roll-like
 
   // For Z (yaw) we will use library fused yaw (may drift) - optional improvements possible
@@ -196,20 +207,25 @@ SensorReading readSensors() {
 }
 
 // ---------- Basic Auth helper ----------
-bool checkAuth() {
-  if (!USE_BASIC_AUTH) return true;
-  if (!server.hasHeader("Authorization")) return false;
+bool checkAuth()
+{
+  if (!USE_BASIC_AUTH)
+    return true;
+  if (!server.hasHeader("Authorization"))
+    return false;
   return server.authenticate(WWW_USER, WWW_PASS);
 }
 
 // ---------- HTTP handlers ----------
-void handleRoot() {
-  if (!checkAuth()) {
+void handleRoot()
+{
+  if (!checkAuth())
+  {
     server.requestAuthentication();
     return;
   }
 
-  const char* html = R"rawliteral(
+  const char *html = R"rawliteral(
 <!doctype html>
 <html>
 <head>
@@ -320,8 +336,10 @@ setInterval(update, 3000);
   server.send(200, "text/html", html);
 }
 
-void handleData() {
-  if (!checkAuth()) {
+void handleData()
+{
+  if (!checkAuth())
+  {
     server.requestAuthentication();
     return;
   }
@@ -331,8 +349,8 @@ void handleData() {
   String json = "{";
   json += "\"ESP_ms\":" + String(r.esp_ms) + ",";
   json += "\"Temperature_C\":" + String(r.temperature, 2) + ",";
-  json += "\"Pressure_hPa\":"   + String(r.pressure, 2) + ",";
-  json += "\"Altitude_m\":"     + String(r.altitude, 2) + ",";
+  json += "\"Pressure_hPa\":" + String(r.pressure, 2) + ",";
+  json += "\"Altitude_m\":" + String(r.altitude, 2) + ",";
   json += "\"AngleX\":" + String(r.angleX, 2) + ",";
   json += "\"AngleY\":" + String(r.angleY, 2) + ",";
   json += "\"AngleZ\":" + String(r.angleZ, 2) + ",";
@@ -344,8 +362,10 @@ void handleData() {
 }
 
 // /calibrate endpoint: runs averaging calibration, saves offsets, returns JSON
-void handleCalibrate() {
-  if (!checkAuth()) {
+void handleCalibrate()
+{
+  if (!checkAuth())
+  {
     server.requestAuthentication();
     return;
   }
@@ -356,15 +376,16 @@ void handleCalibrate() {
 
   Serial.println("Calibration: keep MPU perfectly still and flat.");
   bool ok = false;
-  float new_ax_off=0, new_ay_off=0, new_az_off=0;
-  float new_gx_off=0, new_gy_off=0, new_gz_off=0;
+  float new_ax_off = 0, new_ay_off = 0, new_az_off = 0;
+  float new_gx_off = 0, new_gy_off = 0, new_gz_off = 0;
 
   ok = doAveragingCalibration(samples, sampDelayMs,
                               new_ax_off, new_ay_off, new_az_off,
                               new_gx_off, new_gy_off, new_gz_off);
 
   String json;
-  if (!ok) {
+  if (!ok)
+  {
     Serial.println("Calibration failed (sensor not stable or orientation unexpected).");
     json = "{\"ok\":false}";
     server.send(200, "application/json", json);
@@ -383,22 +404,23 @@ void handleCalibrate() {
 
   json = "{";
   json += "\"ok\":true,";
-  json += "\"accOffX\":" + String(accOffX,6) + ",";
-  json += "\"accOffY\":" + String(accOffY,6) + ",";
-  json += "\"accOffZ\":" + String(accOffZ,6) + ",";
-  json += "\"gyrOffX\":" + String(gyrOffX,4) + ",";
-  json += "\"gyrOffY\":" + String(gyrOffY,4) + ",";
-  json += "\"gyrOffZ\":" + String(gyrOffZ,4);
+  json += "\"accOffX\":" + String(accOffX, 6) + ",";
+  json += "\"accOffY\":" + String(accOffY, 6) + ",";
+  json += "\"accOffZ\":" + String(accOffZ, 6) + ",";
+  json += "\"gyrOffX\":" + String(gyrOffX, 4) + ",";
+  json += "\"gyrOffY\":" + String(gyrOffY, 4) + ",";
+  json += "\"gyrOffZ\":" + String(gyrOffZ, 4);
   json += "}";
   server.send(200, "application/json", json);
 }
 
 // -------------------- LCD / IR alert helpers --------------------
-bool lastIrActive = false;    // last known state written to LCD
-bool irActive = false;        // current state
+bool lastIrActive = false; // last known state written to LCD
+bool irActive = false;     // current state
 
 // show IR alert on LCD (writes once; no clear)
-void showIrAlert() {
+void showIrAlert()
+{
   const char *l0 = "IR Triggered";
   const char *l1 = "Alert !!!";
   char buf[17];
@@ -415,7 +437,8 @@ void showIrAlert() {
 }
 
 // Restore normal sensor display by calling updateLCD once (overwrites lines)
-void restoreNormalDisplay() {
+void restoreNormalDisplay()
+{
   SensorReading s = readSensors();
   // call updateLCD to draw sensor values (it will pad/overwrite entire lines)
   // Use a private version that doesn't update lcd_last so immediate draw occurs
@@ -427,36 +450,45 @@ void restoreNormalDisplay() {
   lcd.setCursor(0, 0);
   lcd.print(line1);
   int len1 = strlen(line1);
-  for (int i = len1; i < 16; ++i) lcd.print(' ');
+  for (int i = len1; i < 16; ++i)
+    lcd.print(' ');
 
   lcd.setCursor(0, 1);
   lcd.print(line2);
   int len2 = strlen(line2);
-  for (int i = len2; i < 16; ++i) lcd.print(' ');
+  for (int i = len2; i < 16; ++i)
+    lcd.print(' ');
 }
 
 // existing updateLCD used by periodic refresh (keeps lcd_last timing)
-void updateLCD(const SensorReading &s) {
+void updateLCD(const SensorReading &s)
+{
   // We'll display: line1 => Temp(°C) and Alt(m) (short), line2 => AngX,AngY
   char line1[17], line2[17];
   snprintf(line1, sizeof(line1), "T:%4.1fC A:%5.1fm", s.temperature, s.altitude);
   snprintf(line2, sizeof(line2), "X:%5.1f Y:%5.1f", s.angleX, s.angleY);
 
-  lcd.setCursor(0,0);
+  lcd.setCursor(0, 0);
   lcd.print(line1);
   int len1 = strlen(line1);
-  for (int i = len1; i < 16; ++i) lcd.print(' ');
+  for (int i = len1; i < 16; ++i)
+    lcd.print(' ');
 
-  lcd.setCursor(0,1);
+  lcd.setCursor(0, 1);
   lcd.print(line2);
   int len2 = strlen(line2);
-  for (int i = len2; i < 16; ++i) lcd.print(' ');
+  for (int i = len2; i < 16; ++i)
+    lcd.print(' ');
 }
 
 // -------------------- Setup / Loop --------------------
-void setup() {
+void setup()
+{
   Serial.begin(SERIAL_BAUD);
-  while (!Serial) { delay(10); }
+  while (!Serial)
+  {
+    delay(10);
+  }
   delay(50);
   pinMode(IR_PIN, INPUT);
 
@@ -469,27 +501,36 @@ void setup() {
 
   // Initialize BMP280 once (guard with bmp_ok)
   bmp_ok = bmp.begin(BMP_I2C_ADDR);
-  if (!bmp_ok) {
+  if (!bmp_ok)
+  {
     Serial.printf("Warning: BMP280 not found at 0x%02X\n", BMP_I2C_ADDR);
-  } else {
+  }
+  else
+  {
     Serial.println("BMP280 initialized.");
   }
 
   // Initialize MPU6050
   byte status = mpu.begin();
-  if (status == 0) {
+  if (status == 0)
+  {
     Serial.println("MPU6050 initialized.");
-  } else {
+  }
+  else
+  {
     Serial.printf("Warning: MPU6050 init returned status %u\n", status);
   }
 
   // Load any previously saved offsets
   loadOffsetsFromPrefs();
-  if (offsetsLoaded) {
+  if (offsetsLoaded)
+  {
     Serial.println("Loaded stored MPU offsets from Preferences.");
     Serial.printf("accOffs g: %.6f, %.6f, %.6f\n", accOffX, accOffY, accOffZ);
     Serial.printf("gyrOffs dps: %.4f, %.4f, %.4f\n", gyrOffX, gyrOffY, gyrOffZ);
-  } else {
+  }
+  else
+  {
     Serial.println("No stored offsets found — using built-in defaults.");
   }
 
@@ -499,9 +540,9 @@ void setup() {
   delay(50);
 
   // show a boot message briefly (no long blocking delays)
-  lcd.setCursor(0,0);
+  lcd.setCursor(0, 0);
   lcd.print("ESP32 Sensors");
-  lcd.setCursor(0,1);
+  lcd.setCursor(0, 1);
   lcd.print("Starting...");
   delay(700);
   lcd.clear();
@@ -511,16 +552,20 @@ void setup() {
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   Serial.print("Connecting to WiFi");
   int tries = 0;
-  while (WiFi.status() != WL_CONNECTED && tries < 40) {
+  while (WiFi.status() != WL_CONNECTED && tries < 40)
+  {
     delay(250);
     Serial.print(".");
     tries++;
   }
   Serial.println();
-  if (WiFi.status() == WL_CONNECTED) {
+  if (WiFi.status() == WL_CONNECTED)
+  {
     Serial.print("Connected. IP address: ");
     Serial.println(WiFi.localIP());
-  } else {
+  }
+  else
+  {
     Serial.println("WiFi connect failed. Check SSID/password and network.");
   }
 
@@ -533,27 +578,35 @@ void setup() {
 
   // initialize lastIrActive to current state so we don't flicker at boot
   lastIrActive = digitalRead(IR_PIN) == LOW;
-  if (lastIrActive) {
+  if (lastIrActive)
+  {
     showIrAlert();
-  } else {
+  }
+  else
+  {
     // draw initial sensor values immediately
     restoreNormalDisplay();
   }
 }
 
-void loop() {
+void loop()
+{
   // keep MPU integration accurate: call update frequently
   mpu.update();
 
   // Read IR pin and update LCD only on transitions
   irActive = (digitalRead(IR_PIN) == LOW); // LOW means detected per your wiring
-  if (irActive != lastIrActive) {
+  if (irActive != lastIrActive)
+  {
     // state changed
-    if (irActive) {
+    if (irActive)
+    {
       // show alert once
       showIrAlert();
       Serial.println("IR Detected - LCD showing alert");
-    } else {
+    }
+    else
+    {
       // restore normal sensor display immediately
       restoreNormalDisplay();
       Serial.println("IR cleared - LCD restored");
@@ -565,7 +618,8 @@ void loop() {
   server.handleClient();
 
   // Periodic LCD refresh when not in IR alert
-  if (!irActive && (millis() - lcd_last > LCD_UPDATE_MS)) {
+  if (!irActive && (millis() - lcd_last > LCD_UPDATE_MS))
+  {
     SensorReading s = readSensors(); // readSensors already updates mpu and applies offsets
     updateLCD(s);
     lcd_last = millis();
