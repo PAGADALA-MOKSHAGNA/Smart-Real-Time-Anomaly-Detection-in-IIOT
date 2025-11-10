@@ -1,10 +1,10 @@
 /*
-  ESP32 BMP280 + MPU6050 Web Server (no ACS712)
+  ESP32 BMP280 + MPU6050 Web Server (with persistent calibration + LCD + IR alert)
   - Shows IP in Serial
   - Serves '/' (HTML) and '/data' (JSON) endpoints
-  - Browser polls /data every 3 seconds to update UI
+  - New endpoint '/calibrate' performs averaging calibration and saves offsets to Preferences
   - I2C: SDA=21, SCL=22 (ESP32)
-  - Requires libraries: Adafruit_BMP280, MPU6050_light
+  - Requires libraries: Adafruit_BMP280, MPU6050_light, LiquidCrystal_I2C
 */
 
 #include <WiFi.h>
@@ -13,11 +13,13 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BMP280.h>
 #include <MPU6050_light.h>
-#include "LiquidCrystal_I2C.h"
+#include <Preferences.h>
+#include <LiquidCrystal_I2C.h>
 
 // ---------- USER CONFIG ----------
-const char* WIFI_SSID = "Eshu";
-const char* WIFI_PASS = "rajmohan";
+const char* WIFI_SSID = "Janardhana Rao";
+const char* WIFI_PASS = "Madhavi#888";
+const int IR_PIN = 27;
 
 // Basic HTTP auth (optional). Set USE_BASIC_AUTH=false to disable.
 const bool USE_BASIC_AUTH = true;
@@ -31,14 +33,29 @@ const char* WWW_PASS = "MLG333";
 #define BMP_I2C_ADDR 0x76
 #define SEALEVELPRESSURE_HPA 1013.25F
 #define SERIAL_BAUD 115200
-#define POLL_INTERVAL_MS 1000UL  // 1 seconds polling from client - server returns instant readings
+#define POLL_INTERVAL_MS 1000UL  // not used for server polling but kept
 
 Adafruit_BMP280 bmp;
 MPU6050 mpu(Wire);
 WebServer server(80);
-LiquidCrystal_I2C lcd(0x27, 16, 2);
+Preferences prefs;
 
 bool bmp_ok = false;
+
+LiquidCrystal_I2C lcd(0x27, 16, 2); // change 0x27 to 0x3F if your module reports that address
+unsigned long lcd_last = 0;
+const unsigned long LCD_UPDATE_MS = 1000; // update LCD once per second when not alert
+
+// ---------- Calibration offsets (default values from your calibration) ----------
+float accOffX = 0.130075f;
+float accOffY = -0.001063f;
+float accOffZ = -0.053148f;
+
+float gyrOffX = 3.4171f;
+float gyrOffY = 3.6740f;
+float gyrOffZ = 3.6400f;
+
+bool offsetsLoaded = false;
 
 struct SensorReading {
   unsigned long esp_ms;
@@ -49,6 +66,90 @@ struct SensorReading {
   float accX, accY, accZ;
 };
 
+static inline float rad2deg(float r) { return r * 57.29577951308232f; }
+
+// ---------- Helpers: save/load offsets ----------
+void saveOffsetsToPrefs() {
+  prefs.begin("mpu", false);
+  prefs.putFloat("ax", accOffX);
+  prefs.putFloat("ay", accOffY);
+  prefs.putFloat("az", accOffZ);
+  prefs.putFloat("gx", gyrOffX);
+  prefs.putFloat("gy", gyrOffY);
+  prefs.putFloat("gz", gyrOffZ);
+  prefs.putBool("ok", true);
+  prefs.end();
+}
+
+void loadOffsetsFromPrefs() {
+  prefs.begin("mpu", true);
+  if (prefs.getBool("ok", false)) {
+    accOffX = prefs.getFloat("ax", accOffX);
+    accOffY = prefs.getFloat("ay", accOffY);
+    accOffZ = prefs.getFloat("az", accOffZ);
+    gyrOffX = prefs.getFloat("gx", gyrOffX);
+    gyrOffY = prefs.getFloat("gy", gyrOffY);
+    gyrOffZ = prefs.getFloat("gz", gyrOffZ);
+    offsetsLoaded = true;
+  }
+  prefs.end();
+}
+
+// ---------- Calibration routine (averaging) ----------
+bool doAveragingCalibration(unsigned int samples, unsigned long sampleDelayMs,
+                            float &out_accOffX, float &out_accOffY, float &out_accOffZ,
+                            float &out_gyrOffX, float &out_gyrOffY, float &out_gyrOffZ) {
+  double sAx = 0, sAy = 0, sAz = 0;
+  double sGx = 0, sGy = 0, sGz = 0;
+
+  delay(200); // small settle
+
+  for (unsigned int i = 0; i < samples; ++i) {
+    mpu.update();
+    // library returns accel in g and gyro in deg/s
+    float ax = mpu.getAccX();
+    float ay = mpu.getAccY();
+    float az = mpu.getAccZ();
+    float gx = mpu.getGyroX();
+    float gy = mpu.getGyroY();
+    float gz = mpu.getGyroZ();
+
+    sAx += ax;
+    sAy += ay;
+    sAz += az;
+    sGx += gx;
+    sGy += gy;
+    sGz += gz;
+
+    delay(sampleDelayMs);
+  }
+
+  float meanAx = (float)(sAx / samples);
+  float meanAy = (float)(sAy / samples);
+  float meanAz = (float)(sAz / samples);
+
+  float meanGx = (float)(sGx / samples);
+  float meanGy = (float)(sGy / samples);
+  float meanGz = (float)(sGz / samples);
+
+  // Desired: ax=0, ay=0, az=+1g when flat
+  out_accOffX = meanAx - 0.0f;
+  out_accOffY = meanAy - 0.0f;
+  out_accOffZ = meanAz - 1.0f;
+
+  out_gyrOffX = meanGx;
+  out_gyrOffY = meanGy;
+  out_gyrOffZ = meanGz;
+
+  // sanity check: ensure meanAz reasonably near ±1g else fail
+  if (fabs(meanAz) < 0.5f) {
+    // probably sensor not oriented or something wrong
+    return false;
+  }
+  return true;
+}
+
+// ---------- Sensor read (applies offsets and computes corrected tilt) ----------
 SensorReading readSensors() {
   SensorReading r;
   r.esp_ms = millis();
@@ -64,13 +165,32 @@ SensorReading readSensors() {
     r.altitude = 0.0;
   }
 
-  // MPU readings (ensure update called frequently in loop)
-  r.angleX = mpu.getAngleX();
-  r.angleY = mpu.getAngleY();
-  r.angleZ = mpu.getAngleZ();
-  r.accX = mpu.getAccX();
-  r.accY = mpu.getAccY();
-  r.accZ = mpu.getAccZ();
+  // Ensure MPU values are fresh
+  mpu.update();
+
+  // Get raw accel (library gives g)
+  float rawAx = mpu.getAccX();
+  float rawAy = mpu.getAccY();
+  float rawAz = mpu.getAccZ();
+
+  // Apply stored offsets (subtract bias)
+  float corrAx = rawAx - accOffX;
+  float corrAy = rawAy - accOffY;
+  float corrAz = rawAz - accOffZ;
+
+  // Compute tilt X and Y (degrees) from corrected accel
+  float angleX = atan2(corrAy, corrAz) * 180.0f / PI; // pitch-like
+  float angleY = atan2(-corrAx, sqrtf(corrAy * corrAy + corrAz * corrAz)) * 180.0f / PI; // roll-like
+
+  // For Z (yaw) we will use library fused yaw (may drift) - optional improvements possible
+  float angleZ = mpu.getAngleZ();
+
+  r.angleX = angleX;
+  r.angleY = angleY;
+  r.angleZ = angleZ;
+  r.accX = corrAx;
+  r.accY = corrAy;
+  r.accZ = corrAz;
 
   return r;
 }
@@ -113,12 +233,24 @@ void handleRoot() {
   <div class="row"><span class="label">Copy for ML Model:</span>
   <span id="csvline" style="font-family: monospace; color:#006400">...</span>
   </div>
+  <div class="row">
+    <button onclick="calibrate()">Calibrate Now</button>
+    <span id="calmsg"></span>
+  </div>
+    <div class="row">
+    <span class="label">Model:</span>
+    <span id="model_result">...</span>
+  </div>
 <script>
-function update() {
-  fetch('/data').then(r => {
+const FLASK_PREDICT_URL = "http://192.168.31.78:5000/predict";
+async function update() {
+  try {
+    // 1) Fetch ESP32 raw sensor data (keep existing behavior)
+    const r = await fetch('/data');
     if (!r.ok) throw 'fetch error ' + r.status;
-    return r.json();
-  }).then(j => {
+    const j = await r.json();
+
+    // update raw sensor fields (same as before)
     document.getElementById('devip').textContent = window.location.host;
     document.getElementById('temp').textContent = j.Temperature_C.toFixed(2);
     document.getElementById('pres').textContent = j.Pressure_hPa.toFixed(2);
@@ -127,7 +259,6 @@ function update() {
     document.getElementById('acc').textContent = j.AccX_g.toFixed(3) + ', ' + j.AccY_g.toFixed(3) + ', ' + j.AccZ_g.toFixed(3);
 
     // Create CSV-style string in model order:
-    // Temperature_C,Pressure_hPa,AngleX,AngleY,AngleZ,AccX_g,AccY_g,AccZ_g,Altitude_m
     const csvline = [
       j.Temperature_C.toFixed(2),
       j.Pressure_hPa.toFixed(2),
@@ -139,11 +270,42 @@ function update() {
       j.AccZ_g.toFixed(3),
       j.Altitude_m.toFixed(2)
     ].join(',');
-
     document.getElementById('csvline').textContent = csvline;
 
-  }).catch(e => {
+    // 2) Fetch model prediction from your Flask middleware
+    //    (do this after updating the raw values so UI remains responsive)
+    try {
+      const resp = await fetch(FLASK_PREDICT_URL, { method: "GET", mode: "cors" });
+      if (!resp.ok) {
+        console.error("Flask /predict error:", resp.status, resp.statusText);
+        document.getElementById('model_result').textContent = "Err";
+      } else {
+        const pdata = await resp.json();
+        const output = (pdata && pdata.model_output !== undefined) ? pdata.model_output : null;
+        document.getElementById('model_result').textContent = (output === null) ? "No output" : String(output);
+      }
+    } catch (pferr) {
+      console.error("Failed to fetch prediction:", pferr);
+      document.getElementById('model_result').textContent = "Conn Err";
+    }
+
+  } catch (e) {
     console.error('Update error:', e);
+  }
+}
+
+
+function calibrate() {
+  if (!confirm('Keep MPU perfectly still and flat. Click OK to start calibration (takes ~3s).')) return;
+  document.getElementById('calmsg').textContent = ' Calibrating...';
+  fetch('/calibrate').then(r => r.json()).then(j => {
+    document.getElementById('calmsg').textContent = ' Done. Offsets saved.';
+    setTimeout(()=>document.getElementById('calmsg').textContent = '', 3000);
+    console.log('Calibration result', j);
+  }).catch(e => {
+    document.getElementById('calmsg').textContent = ' Calibration failed.';
+    console.error(e);
+    setTimeout(()=>document.getElementById('calmsg').textContent = '', 3000);
   });
 }
 
@@ -181,25 +343,125 @@ void handleData() {
   server.send(200, "application/json", json);
 }
 
+// /calibrate endpoint: runs averaging calibration, saves offsets, returns JSON
+void handleCalibrate() {
+  if (!checkAuth()) {
+    server.requestAuthentication();
+    return;
+  }
+
+  // perform averaging calibration (blocking) - choose samples and delay
+  const unsigned int samples = 800;
+  const unsigned long sampDelayMs = 3;
+
+  Serial.println("Calibration: keep MPU perfectly still and flat.");
+  bool ok = false;
+  float new_ax_off=0, new_ay_off=0, new_az_off=0;
+  float new_gx_off=0, new_gy_off=0, new_gz_off=0;
+
+  ok = doAveragingCalibration(samples, sampDelayMs,
+                              new_ax_off, new_ay_off, new_az_off,
+                              new_gx_off, new_gy_off, new_gz_off);
+
+  String json;
+  if (!ok) {
+    Serial.println("Calibration failed (sensor not stable or orientation unexpected).");
+    json = "{\"ok\":false}";
+    server.send(200, "application/json", json);
+    return;
+  }
+
+  // apply new offsets to globals and persist
+  accOffX = new_ax_off;
+  accOffY = new_ay_off;
+  accOffZ = new_az_off;
+  gyrOffX = new_gx_off;
+  gyrOffY = new_gy_off;
+  gyrOffZ = new_gz_off;
+
+  saveOffsetsToPrefs();
+
+  json = "{";
+  json += "\"ok\":true,";
+  json += "\"accOffX\":" + String(accOffX,6) + ",";
+  json += "\"accOffY\":" + String(accOffY,6) + ",";
+  json += "\"accOffZ\":" + String(accOffZ,6) + ",";
+  json += "\"gyrOffX\":" + String(gyrOffX,4) + ",";
+  json += "\"gyrOffY\":" + String(gyrOffY,4) + ",";
+  json += "\"gyrOffZ\":" + String(gyrOffZ,4);
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+// -------------------- LCD / IR alert helpers --------------------
+bool lastIrActive = false;    // last known state written to LCD
+bool irActive = false;        // current state
+
+// show IR alert on LCD (writes once; no clear)
+void showIrAlert() {
+  const char *l0 = "IR Triggered";
+  const char *l1 = "Alert !!!";
+  char buf[17];
+
+  // line 0
+  lcd.setCursor(0, 0);
+  snprintf(buf, sizeof(buf), "%-16s", l0); // pad right to 16
+  lcd.print(buf);
+
+  // line 1
+  lcd.setCursor(0, 1);
+  snprintf(buf, sizeof(buf), "%-16s", l1);
+  lcd.print(buf);
+}
+
+// Restore normal sensor display by calling updateLCD once (overwrites lines)
+void restoreNormalDisplay() {
+  SensorReading s = readSensors();
+  // call updateLCD to draw sensor values (it will pad/overwrite entire lines)
+  // Use a private version that doesn't update lcd_last so immediate draw occurs
+  // We'll write directly here similar to updateLCD.
+  char line1[17], line2[17];
+  snprintf(line1, sizeof(line1), "T:%4.1fC A:%5.1fm", s.temperature, s.altitude);
+  snprintf(line2, sizeof(line2), "X:%5.1f Y:%5.1f", s.angleX, s.angleY);
+
+  lcd.setCursor(0, 0);
+  lcd.print(line1);
+  int len1 = strlen(line1);
+  for (int i = len1; i < 16; ++i) lcd.print(' ');
+
+  lcd.setCursor(0, 1);
+  lcd.print(line2);
+  int len2 = strlen(line2);
+  for (int i = len2; i < 16; ++i) lcd.print(' ');
+}
+
+// existing updateLCD used by periodic refresh (keeps lcd_last timing)
+void updateLCD(const SensorReading &s) {
+  // We'll display: line1 => Temp(°C) and Alt(m) (short), line2 => AngX,AngY
+  char line1[17], line2[17];
+  snprintf(line1, sizeof(line1), "T:%4.1fC A:%5.1fm", s.temperature, s.altitude);
+  snprintf(line2, sizeof(line2), "X:%5.1f Y:%5.1f", s.angleX, s.angleY);
+
+  lcd.setCursor(0,0);
+  lcd.print(line1);
+  int len1 = strlen(line1);
+  for (int i = len1; i < 16; ++i) lcd.print(' ');
+
+  lcd.setCursor(0,1);
+  lcd.print(line2);
+  int len2 = strlen(line2);
+  for (int i = len2; i < 16; ++i) lcd.print(' ');
+}
+
+// -------------------- Setup / Loop --------------------
 void setup() {
   Serial.begin(SERIAL_BAUD);
   while (!Serial) { delay(10); }
   delay(50);
-
-  // Display Setup - LCD - 1602A
-  lcd.init();
-  lcd.backlight();
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Display Started...");
-  delay(1500);
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("System Ready...");
-
+  pinMode(IR_PIN, INPUT);
 
   Serial.println();
-  Serial.println("ESP32 BMP280 + MPU6050 Web Server");
+  Serial.println("ESP32 BMP280 + MPU6050 Web Server (with calibration + LCD + IR)");
 
   // Setup I2C
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -221,10 +483,28 @@ void setup() {
     Serial.printf("Warning: MPU6050 init returned status %u\n", status);
   }
 
-  Serial.println("Calculating MPU offsets (keep module still)...");
-  delay(200);
-  mpu.calcOffsets();
-  Serial.println("MPU offsets calculated.");
+  // Load any previously saved offsets
+  loadOffsetsFromPrefs();
+  if (offsetsLoaded) {
+    Serial.println("Loaded stored MPU offsets from Preferences.");
+    Serial.printf("accOffs g: %.6f, %.6f, %.6f\n", accOffX, accOffY, accOffZ);
+    Serial.printf("gyrOffs dps: %.4f, %.4f, %.4f\n", gyrOffX, gyrOffY, gyrOffZ);
+  } else {
+    Serial.println("No stored offsets found — using built-in defaults.");
+  }
+
+  // initialize the lcd AFTER calibration/loading offsets
+  lcd.init();
+  lcd.backlight();
+  delay(50);
+
+  // show a boot message briefly (no long blocking delays)
+  lcd.setCursor(0,0);
+  lcd.print("ESP32 Sensors");
+  lcd.setCursor(0,1);
+  lcd.print("Starting...");
+  delay(700);
+  lcd.clear();
 
   // Connect to Wi-Fi
   WiFi.mode(WIFI_STA);
@@ -247,16 +527,49 @@ void setup() {
   // HTTP routes
   server.on("/", handleRoot);
   server.on("/data", handleData);
+  server.on("/calibrate", handleCalibrate);
   server.begin();
   Serial.println("HTTP server started.");
+
+  // initialize lastIrActive to current state so we don't flicker at boot
+  lastIrActive = digitalRead(IR_PIN) == LOW;
+  if (lastIrActive) {
+    showIrAlert();
+  } else {
+    // draw initial sensor values immediately
+    restoreNormalDisplay();
+  }
 }
 
 void loop() {
   // keep MPU integration accurate: call update frequently
   mpu.update();
 
+  // Read IR pin and update LCD only on transitions
+  irActive = (digitalRead(IR_PIN) == LOW); // LOW means detected per your wiring
+  if (irActive != lastIrActive) {
+    // state changed
+    if (irActive) {
+      // show alert once
+      showIrAlert();
+      Serial.println("IR Detected - LCD showing alert");
+    } else {
+      // restore normal sensor display immediately
+      restoreNormalDisplay();
+      Serial.println("IR cleared - LCD restored");
+    }
+    lastIrActive = irActive;
+  }
+
   // handle HTTP clients (page requests)
   server.handleClient();
 
-  delay(5); // small yield
+  // Periodic LCD refresh when not in IR alert
+  if (!irActive && (millis() - lcd_last > LCD_UPDATE_MS)) {
+    SensorReading s = readSensors(); // readSensors already updates mpu and applies offsets
+    updateLCD(s);
+    lcd_last = millis();
+  }
+
+  delay(20); // shorter yield so mpu.update() is called often (improves fusion)
 }
